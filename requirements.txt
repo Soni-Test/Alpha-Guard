@@ -4,3 +4,4 @@ vaderSentiment
 SQLAlchemy
 psycopg2-binary
 yfinance
+nltk
