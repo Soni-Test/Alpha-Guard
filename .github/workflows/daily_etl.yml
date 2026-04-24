@@ -2,9 +2,13 @@ name: Alpha-Guard Daily ETL Pipeline
 
 on:
   schedule:
-    # Runs at 22:00 (10 PM) IST every Monday through Friday
+    # Runs at 22:00 (10 PM) UTC every Monday through Friday
     - cron: '0 22 * * 1-5'
   workflow_dispatch: # Allows manual execution for testing
+
+# THE FIX: This forces GitHub to use their new Node 24 servers
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   run-pipeline:
