@@ -3,3 +3,4 @@ requests
 vaderSentiment
 SQLAlchemy
 psycopg2-binary
+yfinance
