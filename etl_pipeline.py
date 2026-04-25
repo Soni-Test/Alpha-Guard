@@ -8,29 +8,30 @@ from datetime import datetime, timedelta
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+
 # Download VADER lexicon for sentiment analysis
 nltk.download('vader_lexicon')
 
 # --- CONFIGURATION ---
-# 1. Securely fetch the Neon URL from GitHub Secrets (Notice there is NO password written here!)
+# 1. Securely fetch the Neon URL from GitHub Secrets 
 db_url = os.environ.get("DATABASE_URL")
 
 # Safety Check: Stop the script if the database URL isn't found
 if not db_url:
     raise ValueError("🚨 ERROR: DATABASE_URL not found! Make sure it is set in GitHub Secrets.")
 
-# 2. Fix the Cloud Postgres Protocol Quirk (Neon uses postgres://, SQLAlchemy needs postgresql://)
+# 2. Fix the Cloud Postgres Protocol Quirk (Reminder : Neon uses postgres://, SQLAlchemy needs postgresql://)
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
 # 3. Create the engine securely
 ENGINE = create_engine(db_url)
 
-# Keep your tickers!
+# Tickers
 TICKERS = ['AAPL', 'MSFT', 'JPM', 'GS']
 
 
-
+# Code---
 def process_market_data(tickers):
     """Fetches market data and calculates risk metrics (Volatility & Anomalies)."""
     print("Fetching Market Data...")
@@ -49,7 +50,7 @@ def process_market_data(tickers):
         # 20-day rolling volatility (Standard Deviation of returns)
         df['rolling_volatility'] = df['daily_return'].rolling(window=20).std() 
         
-        # Anomaly Detection: Flag if the daily return is an outlier (e.g., > 3 standard deviations)
+        # Anomaly Detection: Flag if the daily return is an outlier 
         mean_return = df['daily_return'].mean()
         std_return = df['daily_return'].std()
         df['price_anomaly_flag'] = abs(df['daily_return'] - mean_return) > (3 * std_return)
@@ -62,7 +63,7 @@ def process_market_data(tickers):
         
     final_df = pd.concat(appended_data)
     
-    # Load to PostgreSQL
+    # Loading to PostgreSQL
     final_df.to_sql('market_risk_data', ENGINE, if_exists='append', index=False)
     print(f"Successfully loaded {len(final_df)} market records to Database.")
 
