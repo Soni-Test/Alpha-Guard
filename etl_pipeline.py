@@ -10,33 +10,27 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 # Download VADER lexicon for sentiment analysis
-nltk.download('vader_lexicon')
+nltk.download('vader_lexicon', quiet=True)
 
 # --- CONFIGURATION ---
-# 1. Securely fetch the Neon URL from GitHub Secrets 
 db_url = os.environ.get("DATABASE_URL")
 
-# Safety Check: Stop the script if the database URL isn't found
 if not db_url:
     raise ValueError("🚨 ERROR: DATABASE_URL not found! Make sure it is set in GitHub Secrets.")
 
-# 2. Fix the Cloud Postgres Protocol Quirk (Reminder : Neon uses postgres://, SQLAlchemy needs postgresql://)
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-# 3. Create the engine securely
 ENGINE = create_engine(db_url)
-
-# Tickers
 TICKERS = ['AAPL', 'MSFT', 'JPM', 'GS']
 
+# --- PHASE 1: EXTRACTION ---
 
-# Code---
-def process_market_data(tickers):
-    """Fetches market data and calculates risk metrics (Volatility & Anomalies)."""
+def fetch_market_data(tickers):
+    """Fetches market data and calculates baseline risk metrics."""
     print("Fetching Market Data...")
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=365) # 1 year of data for rolling metrics
+    start_date = end_date - timedelta(days=365)
     
     appended_data = []
     
@@ -44,61 +38,45 @@ def process_market_data(tickers):
         df = yf.download(ticker, start=start_date, end=end_date, progress=False)
         df = df.reset_index()
         
-        # Calculate Risk Metrics
         df['ticker'] = ticker
         df['daily_return'] = df['Close'].pct_change()
-        # 20-day rolling volatility (Standard Deviation of returns)
         df['rolling_volatility'] = df['daily_return'].rolling(window=20).std() 
         
-        # Anomaly Detection: Flag if the daily return is an outlier 
         mean_return = df['daily_return'].mean()
         std_return = df['daily_return'].std()
         df['price_anomaly_flag'] = abs(df['daily_return'] - mean_return) > (3 * std_return)
         
-        # Clean up for DB insertion
         df = df[['Date', 'ticker', 'Close', 'daily_return', 'rolling_volatility', 'price_anomaly_flag']]
         df.columns = ['date', 'ticker', 'close_price', 'daily_return', 'rolling_volatility', 'price_anomaly_flag']
         df = df.dropna()
         appended_data.append(df)
         
-    final_df = pd.concat(appended_data)
-    
-    # Loading to PostgreSQL
-    final_df.to_sql('market_risk_data', ENGINE, if_exists='append', index=False)
-    print(f"Successfully loaded {len(final_df)} market records to Database.")
+    return pd.concat(appended_data)
 
-def process_sentiment_data(tickers):
-    """Fetches recent news via stable XML RSS feeds and applies NLP sentiment scoring."""
-    print("Fetching News and Calculating Sentiment via RSS...")
+def fetch_sentiment_data(tickers):
+    """Fetches news, scores sentiment, and saves raw headlines to DB."""
+    print("Fetching News and Calculating Sentiment...")
     sia = SentimentIntensityAnalyzer()
     sentiment_list = []
     
     for ticker in tickers:
-        # Using Yahoo's official RSS feed (much more stable than yfinance)
         url = f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US'
-        
         try:
-            # Add a User-Agent header so Yahoo doesn't block our script
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             response = urllib.request.urlopen(req)
             xml_data = response.read()
             root = ET.fromstring(xml_data)
             
-            # Loop through every news item in the XML
             for item in root.findall('.//item'):
                 headline = item.find('title').text
                 pub_date_raw = item.find('pubDate').text
                 
-                # Convert RSS date format (e.g., 'Fri, 19 Apr 2026 12:00:00 +0000') to 'YYYY-MM-DD'
                 try:
-                    # Python 3.7+ can parse the timezone with %z, but we'll slice it to be safe
                     parsed_date = datetime.strptime(pub_date_raw[:25].strip(), "%a, %d %b %Y %H:%M:%S")
                     pub_date = parsed_date.strftime('%Y-%m-%d')
                 except Exception:
-                    # Fallback if date format is slightly different
                     pub_date = datetime.today().strftime('%Y-%m-%d')
                     
-                # AI Sentiment Calculation (-1.0 to 1.0)
                 sentiment_score = sia.polarity_scores(headline)['compound']
                 
                 sentiment_list.append({
@@ -112,15 +90,60 @@ def process_sentiment_data(tickers):
             
     if sentiment_list:
         sentiment_df = pd.DataFrame(sentiment_list)
-        
-        # Load to PostgreSQL
+        # Load the raw headlines to the sentiment table just like before
         sentiment_df.to_sql('sentiment_data', ENGINE, if_exists='append', index=False)
-        print(f"Successfully loaded {len(sentiment_df)} sentiment records to Database.")
+        print(f"Successfully loaded {len(sentiment_df)} raw sentiment records to Database.")
+        return sentiment_df
     else:
-        print("No sentiment records were loaded.")
+        print("No sentiment records found.")
+        return pd.DataFrame()
 
+
+# --- PHASE 2: CORRELATION ENGINE & FINAL LOAD ---
+
+def process_and_load_master_data(df_market, df_sentiment):
+    """Merges datasets, calculates Pearson correlation, and loads to DB."""
+    print("Initiating Phase 2: Statistical Correlation Validation...")
+    
+    # Ensure dates are formatted the same for merging
+    df_market['date'] = pd.to_datetime(df_market['date'])
+    df_sentiment['date'] = pd.to_datetime(df_sentiment['date'])
+    
+    # Aggregate sentiment by day AND ticker
+    daily_sentiment = df_sentiment.groupby(['date', 'ticker'])['sentiment_score'].mean().reset_index()
+    
+    # Merge using a LEFT join so we don't lose market days that didn't have news
+    df_master = pd.merge(df_market, daily_sentiment, on=['date', 'ticker'], how='left')
+    df_master['sentiment_score'] = df_master['sentiment_score'].fillna(0) # 0 sentiment if no news
+    
+    # Calculate 20-Day Pearson Correlation strictly grouped by individual ticker
+    df_master['sentiment_price_corr'] = df_master.groupby('ticker').apply(
+        lambda x: x['sentiment_score'].rolling(window=20).corr(x['daily_return'])
+    ).reset_index(level=0, drop=True)
+    
+    # Clean up NaNs
+    df_master['sentiment_price_corr'] = df_master['sentiment_price_corr'].fillna(0)
+    
+    # Drop the sentiment_score column because it isn't in our market_risk_data SQL table
+    df_master = df_master.drop(columns=['sentiment_score'])
+    
+    # Final Database Load
+    df_master.to_sql('market_risk_data', ENGINE, if_exists='append', index=False)
+    print(f"Successfully loaded {len(df_master)} master risk/correlation records to Database.")
+
+
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    print("Starting Alpha-Guard ETL Pipeline...")
-    process_market_data(TICKERS)
-    process_sentiment_data(TICKERS)
-    print("Pipeline Execution Complete!")
+    print("Starting Alpha-Guard ETL Pipeline v1.1...")
+    
+    # Step 1 & 2: Extract
+    market_df = fetch_market_data(TICKERS)
+    sentiment_df = fetch_sentiment_data(TICKERS)
+    
+    # Step 3: Transform & Load
+    if not market_df.empty and not sentiment_df.empty:
+        process_and_load_master_data(market_df, sentiment_df)
+    else:
+        print("Missing data: Skipping Phase 2 correlation engine.")
+        
+    print("Pipeline Execution Complete! 🎉")
