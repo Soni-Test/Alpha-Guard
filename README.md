@@ -15,19 +15,21 @@ The architecture is entirely serverless, relying on **GitHub Actions** for CI/CD
 1. **Extract:** Pulls historical tick data via `yfinance` and financial news headlines via Yahoo RSS XML feeds.
 2. **Transform (Python):** - Calculates 20-day rolling volatility and flags 3-sigma price anomalies.
    - Applies Natural Language Processing (NLP) using `vaderSentiment` to score headline sentiment (-1.0 to 1.0).
-3. **Load (SQLAlchemy):** Pushes cleaned, structured data into a **Neon Serverless PostgreSQL** database.
+   - **[v1.1 Update]** Merges datasets to calculate the **20-Day Rolling Pearson Correlation** between daily stock returns and news sentiment.
+3. **Load (SQLAlchemy):** Pushes cleaned, structured data into a **Neon Serverless PostgreSQL** database utilizing strict `NUMERIC(10, 4)` precision to prevent float rounding errors.
 4. **Automate (CI/CD):** Scheduled cron jobs via GitHub Actions run the pipeline every weekday at 10:00 PM UTC.
 5. **Visualize:** A scheduled Power BI Semantic Model fetches the fresh cloud data to update the dashboard automatically.
 
 ## 🛠️ Tech Stack & Skills Demonstrated
 * **Languages:** Python, SQL
-* **Libraries:** `pandas`, `SQLAlchemy`, `vaderSentiment`, `nltk`, `yfinance`
+* **Libraries:** `pandas`(Data manipulation & Statistical math), `SQLAlchemy`, `vaderSentiment`, `nltk`, `yfinance`
 * **Cloud & Infrastructure:** GitHub Actions (Runner & Secrets Vault), Neon.tech (Cloud DB)
 * **Security:** Decoupled architecture using runtime Environment Variables to secure database credentials.
 * **Analytics:** Power BI (Scheduled Refresh)
 
 ## 🚀 Key Engineering Features
 * **Resilient Automation:** Replaced manual local execution with a containerized Ubuntu GitHub runner.
+* **Precision Data Engineering:** Enforced strict `NUMERIC(10, 4)` SQL schemas over standard floats to prevent floating-point rounding errors in sensitive     financial percentage data.
 * **Secure Credential Management:** Database URIs are never hardcoded. Handled dynamically via `os.environ` and GitHub Secrets.
 * **Schema Handling:** Implemented protocol standardizations (auto-converting `postgres://` to `postgresql://` for SQLAlchemy compatibility).
 * **Fault Tolerance:** Built-in try/except blocks to prevent broken RSS XML nodes from failing the entire pipeline.
