@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from sqlalchemy.dialects.postgresql import insert
 
 # Download VADER lexicon for sentiment analysis
 nltk.download('vader_lexicon', quiet=True)
@@ -102,34 +103,45 @@ def fetch_sentiment_data(tickers):
 # --- PHASE 2: CORRELATION ENGINE & FINAL LOAD ---
 
 def process_and_load_master_data(df_market, df_sentiment):
-    """Merges datasets, calculates Pearson correlation, and loads to DB."""
+    """Merges datasets, calculates Pearson correlation, and loads to DB using UPSERT."""
     print("Initiating Phase 2: Statistical Correlation Validation...")
     
-    # Ensure dates are formatted the same for merging
     df_market['date'] = pd.to_datetime(df_market['date'])
     df_sentiment['date'] = pd.to_datetime(df_sentiment['date'])
     
-    # Aggregate sentiment by day AND ticker
     daily_sentiment = df_sentiment.groupby(['date', 'ticker'])['sentiment_score'].mean().reset_index()
     
-    # Merge using a LEFT join so we don't lose market days that didn't have news
     df_master = pd.merge(df_market, daily_sentiment, on=['date', 'ticker'], how='left')
-    df_master['sentiment_score'] = df_master['sentiment_score'].fillna(0) # 0 sentiment if no news
+    df_master['sentiment_score'] = df_master['sentiment_score'].fillna(0) 
     
-    # Calculate 20-Day Pearson Correlation strictly grouped by individual ticker
+    # [FIXED WARNING]: Added include_groups=False to silence the pandas deprecation warning
     df_master['sentiment_price_corr'] = df_master.groupby('ticker').apply(
-        lambda x: x['sentiment_score'].rolling(window=20).corr(x['daily_return'])
+        lambda x: x['sentiment_score'].rolling(window=20).corr(x['daily_return']),
+        include_groups=False
     ).reset_index(level=0, drop=True)
     
-    # Clean up NaNs
     df_master['sentiment_price_corr'] = df_master['sentiment_price_corr'].fillna(0)
-    
-    # Drop the sentiment_score column because it isn't in our market_risk_data SQL table
     df_master = df_master.drop(columns=['sentiment_score'])
     
-    # Final Database Load
-    df_master.to_sql('market_risk_data', ENGINE, if_exists='append', index=False)
-    print(f"Successfully loaded {len(df_master)} master risk/correlation records to Database.")
+    # --- THE UPSERT FUNCTION ---
+    def postgres_upsert(table, conn, keys, data_iter):
+        """Custom Postgres method to INSERT, or UPDATE if row already exists."""
+        data = [dict(zip(keys, row)) for row in data_iter]
+        insert_stmt = insert(table.table).values(data)
+        
+        # If there is a conflict on Date & Ticker, update all the other columns with the newest math
+        update_dict = {c.name: c for c in insert_stmt.excluded if c.name not in ['date', 'ticker', 'id']}
+        
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=['date', 'ticker'], # This is your UNIQUE constraint!
+            set_=update_dict
+        )
+        conn.execute(upsert_stmt)
+    # ---------------------------
+
+    # Final Database Load (Now using the custom Upsert method!)
+    df_master.to_sql('market_risk_data', ENGINE, if_exists='append', index=False, method=postgres_upsert)
+    print(f"Successfully UPSERTED {len(df_master)} master risk/correlation records to Database.")
 
 
 # --- MAIN EXECUTION ---
